@@ -52,7 +52,7 @@ async def recognize(file: UploadFile = File(...)):
         result = DeepFace.find(
             img_path=img,
             db_path=DB_PATH,
-            model_name="Facenet",
+            model_name="VGG-Face",
             enforce_detection=False,
             detector_backend="opencv"  # 🔥 important fix
         )
