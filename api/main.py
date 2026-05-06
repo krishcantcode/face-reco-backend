@@ -34,6 +34,7 @@ DB_PATH = "registered_faces"
 def home():
     return {"message": "Backend running"}
 
+
 @app.post("/recognize")
 async def recognize(file: UploadFile = File(...)):
     try:
@@ -51,7 +52,7 @@ async def recognize(file: UploadFile = File(...)):
         result = DeepFace.find(
             img_path=img,
             db_path=DB_PATH,
-            model_name="VGG-Face",
+            model_name="Facenet",
             enforce_detection=False,
             detector_backend="opencv"  # 🔥 important fix
         )
@@ -392,7 +393,7 @@ def get_attendance():
 
         return []
     
-    
+
 attendance_active = False
 @app.post("/start-attendance")
 def start_attendance():
