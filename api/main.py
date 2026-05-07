@@ -8,9 +8,17 @@ import csv
 from fastapi import File, UploadFile, Form
 from datetime import datetime
 import shutil
-PENDING_FILE = "pending_students.csv"
-STUDENT_FILE = "students.csv"
-ATTENDANCE_FILE = "attendance.csv"
+import cloudinary
+import cloudinary.uploader
+from dotenv import load_dotenv
+
+load_dotenv()
+
+cloudinary.config(
+    cloud_name=os.getenv("CLOUD_NAME"),
+    api_key=os.getenv("API_KEY"),
+    api_secret=os.getenv("API_SECRET")
+)
 
 from api.database import (
     students_collection,
@@ -19,7 +27,6 @@ from api.database import (
 )
 app = FastAPI()
 
-# Allow React frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,7 +47,7 @@ async def recognize(file: UploadFile = File(...)):
     try:
         contents = await file.read()
 
-        # Convert to OpenCV image
+        # Convert bytes → OpenCV image
         np_arr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
@@ -54,29 +61,43 @@ async def recognize(file: UploadFile = File(...)):
             db_path=DB_PATH,
             model_name="VGG-Face",
             enforce_detection=False,
-            detector_backend="opencv"  # 🔥 important fix
+            detector_backend="opencv"
         )
 
         if len(result) > 0 and not result[0].empty:
+
             df = result[0].sort_values(by="distance")
             best_match = df.iloc[0]
 
             identity_path = best_match["identity"]
             name = os.path.basename(os.path.dirname(identity_path))
 
-            confidence = float(best_match["confidence"])
+            distance = float(best_match["distance"])
 
-            return {
-                "name": name,
-                "confidence": confidence
-            }
+            confidence = round((1 - distance) * 100, 2)
+
+            if distance < 0.7:
+
+                return {
+                    "name": name,
+                    "confidence": confidence,
+                    "distance": distance
+                }
+
+            else:
+
+                return {
+                    "name": "Unknown",
+                    "confidence": confidence,
+                    "distance": distance
+                }
 
         return {"name": "Unknown", "confidence": 0}
 
     except Exception as e:
         print("ERROR:", e)
         return {"name": "Error", "confidence": 0}
-    
+
 from fastapi import Form
 
 @app.post("/request-student")
@@ -88,7 +109,15 @@ async def request_student(
 ):
     try:
 
-        # ---------------- SAVE IMAGE ----------------
+        existing = pending_collection.find_one({
+            "name": name
+        })
+
+        if existing:
+            return {
+                "message": "Student already requested"
+            }
+
         pending_path = os.path.join(
             "pending_faces",
             name
@@ -101,28 +130,31 @@ async def request_student(
             file.filename
         )
 
+        contents = await file.read()
+
         with open(file_path, "wb") as f:
-            f.write(await file.read())
+            f.write(contents)
 
-        # ---------------- CHECK DUPLICATE ----------------
-        existing = pending_collection.find_one({
-            "name": name
-        })
+        upload_result = cloudinary.uploader.upload(
+            file_path,
+            folder="pending_faces",
+            public_id=name,
+            overwrite=True
+        )
 
-        if existing:
-            return {
-                "message": "Student already requested"
-            }
+        image_url = upload_result["secure_url"]
 
-        # ---------------- SAVE TO MONGODB ----------------
         pending_collection.insert_one({
             "name": name,
             "student_id": student_id,
-            "class_name": class_name
+            "class_name": class_name,
+            "image_url": image_url,
+            "local_path": file_path
         })
 
         return {
-            "message": "Request submitted"
+            "message": "Request submitted",
+            "image_url": image_url
         }
 
     except Exception as e:
@@ -132,6 +164,7 @@ async def request_student(
         return {
             "message": str(e)
         }
+    
 @app.get("/pending-students")
 def get_pending():
 
@@ -163,7 +196,6 @@ def get_pending():
 async def approve_student(name: str = Form(...)):
     try:
 
-        # ---------------- MOVE FACE FOLDER ----------------
         src = os.path.join("pending_faces", name)
 
         dest = os.path.join(DB_PATH, name)
@@ -171,7 +203,6 @@ async def approve_student(name: str = Form(...)):
         if os.path.exists(src):
             shutil.move(src, dest)
 
-        # ---------------- GET STUDENT FROM PENDING ----------------
         student = pending_collection.find_one({
             "name": name
         })
@@ -181,14 +212,12 @@ async def approve_student(name: str = Form(...)):
                 "message": "Student not found"
             }
 
-        # ---------------- SAVE TO STUDENTS COLLECTION ----------------
         students_collection.insert_one({
             "name": student["name"],
             "student_id": student["student_id"],
             "class_name": student["class_name"]
         })
 
-        # ---------------- REMOVE FROM PENDING ----------------
         pending_collection.delete_one({
             "name": name
         })
@@ -217,12 +246,10 @@ async def add_student(
 
         print("Received:", name, student_id, class_name)
 
-        # ---------------- CREATE STUDENT FOLDER ----------------
         student_path = os.path.join(DB_PATH, name)
 
         os.makedirs(student_path, exist_ok=True)
 
-        # ---------------- SAVE IMAGE ----------------
         file_path = os.path.join(
             student_path,
             file.filename
@@ -231,7 +258,6 @@ async def add_student(
         with open(file_path, "wb") as f:
             f.write(await file.read())
 
-        # ---------------- CHECK DUPLICATE ----------------
         existing = students_collection.find_one({
             "name": name
         })
@@ -241,7 +267,6 @@ async def add_student(
                 "message": "Student already exists"
             }
 
-        # ---------------- SAVE TO MONGODB ----------------
         students_collection.insert_one({
             "name": name,
             "student_id": student_id,
@@ -264,13 +289,11 @@ async def add_student(
 async def reject_student(name: str = Form(...)):
     try:
 
-        # ---------------- DELETE IMAGE FOLDER ----------------
         path = os.path.join("pending_faces", name)
 
         if os.path.exists(path):
             shutil.rmtree(path)
 
-        # ---------------- REMOVE FROM MONGODB ----------------
         pending_collection.delete_one({
             "name": name
         })
@@ -292,7 +315,6 @@ async def mark_attendance(name: str = Form(...)):
 
     global attendance_active
 
-    # ---------------- CHECK SESSION ----------------
     if not attendance_active:
 
         return {
@@ -307,7 +329,6 @@ async def mark_attendance(name: str = Form(...)):
 
         time_now = datetime.now().strftime("%I:%M:%S %p")
 
-        # ---------------- FIND STUDENT ----------------
         student = students_collection.find_one({
             "name": name
         })
@@ -318,7 +339,6 @@ async def mark_attendance(name: str = Form(...)):
                 "message": "Student Not Found"
             }
 
-        # ---------------- PREVENT DUPLICATE ----------------
         existing = attendance_collection.find_one({
             "name": name,
             "date": today
@@ -330,7 +350,6 @@ async def mark_attendance(name: str = Form(...)):
                 "message": "Already Marked Today"
             }
 
-        # ---------------- SAVE ATTENDANCE ----------------
         attendance_collection.insert_one({
 
             "name": student["name"],
@@ -414,3 +433,32 @@ def stop_attendance():
     return {
         "message": "Attendance Stopped"
     }
+
+@app.get("/students")
+def get_students():
+
+    data = []
+
+    try:
+
+        students = students_collection.find()
+
+        for row in students:
+
+            data.append({
+
+                "Name": row.get("name"),
+
+                "ID": row.get("student_id"),
+
+                "Class": row.get("class_name")
+
+            })
+
+        return data
+
+    except Exception as e:
+
+        print("ERROR:", e)
+
+        return []
